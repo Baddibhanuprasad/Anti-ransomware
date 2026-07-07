@@ -18,9 +18,9 @@ class USBMonitor:
         self.detected_usb = []
         self.callback = None
         self.drive_letters = []
-        self.check_interval = 1  # Check every 1 second for faster detection
+        self.check_interval = 2  # Check every 2 seconds
         self.last_notification_time = {}
-        self.notification_cooldown = 5  # Seconds between notifications for same drive
+        self.notification_cooldown = 10  # Seconds between notifications for same drive
         
     def start_monitoring(self, callback=None):
         """Start USB monitoring"""
@@ -136,7 +136,7 @@ class USBMonitor:
                                 except Exception as e:
                                     print(f"Callback error: {e}")
                             
-                            # Show Windows system notification (balloon tip)
+                            # Show Windows system notification
                             self.show_windows_notification(drive)
                 
                 # Handle removed drives
@@ -166,7 +166,7 @@ class USBMonitor:
         print("USB monitor loop ended")
     
     def show_windows_notification(self, drive_path):
-        """Show Windows system notification"""
+        """Show Windows system notification with Sandbox option"""
         try:
             # Get drive info
             info = self.get_usb_info(drive_path)
@@ -177,59 +177,56 @@ class USBMonitor:
             try:
                 from win10toast import ToastNotifier
                 toaster = ToastNotifier()
+                
+                # Show notification with action
                 toaster.show_toast(
                     "🔌 USB Drive Detected",
-                    f"Drive: {drive_path}\nVolume: {volume_name}\nTotal: {total_space}\n\nClick to scan with Anti-Ransomware",
+                    f"Drive: {drive_path}\nVolume: {volume_name}\nTotal: {total_space}\n\nClick to open in Sandbox",
                     duration=10,
-                    threaded=True
+                    threaded=True,
+                    callback_on_click=lambda: self.open_usb_in_sandbox(drive_path)
                 )
-            except:
-                # Fallback to simple message box
-                pass
-            
-            # Also use system tray balloon (Windows 7/8)
-            try:
-                import ctypes.wintypes
-                
-                # Windows notification using Shell_NotifyIcon
-                class NOTIFYICONDATA(ctypes.Structure):
-                    _fields_ = [
-                        ("cbSize", ctypes.wintypes.DWORD),
-                        ("hWnd", ctypes.wintypes.HWND),
-                        ("uID", ctypes.wintypes.UINT),
-                        ("uFlags", ctypes.wintypes.UINT),
-                        ("uCallbackMessage", ctypes.wintypes.UINT),
-                        ("hIcon", ctypes.wintypes.HANDLE),
-                        ("szTip", ctypes.c_wchar * 128),
-                        ("dwState", ctypes.wintypes.DWORD),
-                        ("dwStateMask", ctypes.wintypes.DWORD),
-                        ("szInfo", ctypes.c_wchar * 256),
-                        ("uTimeout", ctypes.wintypes.UINT),
-                        ("szInfoTitle", ctypes.c_wchar * 64),
-                        ("dwInfoFlags", ctypes.wintypes.DWORD)
-                    ]
-                
-                # Get a window handle
-                hwnd = ctypes.windll.user32.GetDesktopWindow()
-                
-                # Create notification
-                nid = NOTIFYICONDATA()
-                nid.cbSize = ctypes.sizeof(NOTIFYICONDATA)
-                nid.hWnd = hwnd
-                nid.uID = 1001
-                nid.uFlags = 0x00000010  # NIF_INFO
-                nid.szInfo = f"USB Drive {drive_path} detected.\nVolume: {volume_name}"
-                nid.szInfoTitle = "🔌 USB Drive Detected"
-                nid.uTimeout = 10000  # 10 seconds
-                nid.dwInfoFlags = 0x00000001  # NIIF_INFO
-                
-                # Show notification
-                ctypes.windll.shell32.Shell_NotifyIconW(0x00000001, ctypes.byref(nid))  # NIM_ADD
-            except:
-                pass
+                print(f"✅ Toast notification shown for {drive_path}")
+            except ImportError:
+                print("⚠️ win10toast not installed, using fallback notification")
+                self.show_fallback_notification(drive_path, volume_name, total_space)
+            except Exception as e:
+                print(f"Toast notification error: {e}")
+                self.show_fallback_notification(drive_path, volume_name, total_space)
                 
         except Exception as e:
             print(f"Notification error: {e}")
+    
+    def show_fallback_notification(self, drive_path, volume_name, total_space):
+        """Fallback notification using MessageBox"""
+        try:
+            # Use Windows MessageBox as fallback
+            message = f"🔌 USB Drive Detected\n\nDrive: {drive_path}\nVolume: {volume_name}\nTotal: {total_space}\n\nWould you like to open this USB in Sandbox for security?"
+            
+            result = ctypes.windll.user32.MessageBoxW(
+                0,
+                message,
+                "USB Drive Detected - Anti-Ransomware",
+                0x00000004 | 0x00000040  # MB_YESNO | MB_ICONINFORMATION
+            )
+            
+            if result == 6:  # IDYES
+                self.open_usb_in_sandbox(drive_path)
+        except:
+            pass
+    
+    def open_usb_in_sandbox(self, drive_path):
+        """Open USB drive in Sandbox"""
+        try:
+            # This will be called from the callback
+            # We need to use the main thread to open the sandbox
+            if self.callback:
+                self.callback(drive_path, "sandbox_open")
+            else:
+                # Fallback: open explorer for the USB
+                subprocess.Popen(['explorer.exe', drive_path])
+        except Exception as e:
+            print(f"Error opening USB in sandbox: {e}")
     
     def get_usb_info(self, drive_path):
         """Get USB drive information"""
@@ -298,7 +295,7 @@ class USBMonitor:
 
 
 class USBScanner:
-    """USB Scanner class - moved here to avoid import issues"""
+    """USB Scanner class"""
     def __init__(self):
         self.usb_monitor = USBMonitor()
         self.scanning = False
@@ -327,7 +324,7 @@ class USBScanner:
                 if any(skip in root for skip in skip_dirs):
                     continue
                 
-                # Limit scanning depth to avoid too many files
+                # Limit scanning depth
                 depth = root.replace(drive_path, "").count(os.sep)
                 if depth > 5:
                     continue
@@ -337,7 +334,6 @@ class USBScanner:
                         file_path = os.path.join(root, file)
                         results["total_files"] += 1
                         
-                        # Limit file count to avoid performance issues
                         if results["total_files"] > 1000:
                             break
                         

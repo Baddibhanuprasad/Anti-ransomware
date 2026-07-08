@@ -74,41 +74,8 @@ class SandboxManager:
         
         return 'unknown'
     
-    def get_default_app_for_file(self, file_path):
-        ext = os.path.splitext(file_path)[1].lower()
-        
-        app_map = {
-            '.jpg': 'mspaint.exe',
-            '.jpeg': 'mspaint.exe',
-            '.png': 'mspaint.exe',
-            '.gif': 'mspaint.exe',
-            '.bmp': 'mspaint.exe',
-            '.tiff': 'mspaint.exe',
-            '.ico': 'mspaint.exe',
-            '.svg': 'mspaint.exe',
-            '.webp': 'mspaint.exe',
-            '.pdf': 'explorer.exe',
-            '.txt': 'notepad.exe',
-            '.doc': 'winword.exe',
-            '.docx': 'winword.exe',
-            '.xls': 'excel.exe',
-            '.xlsx': 'excel.exe',
-            '.ppt': 'powerpnt.exe',
-            '.pptx': 'powerpnt.exe',
-            '.mp4': 'wmplayer.exe',
-            '.avi': 'wmplayer.exe',
-            '.mkv': 'wmplayer.exe',
-            '.mov': 'wmplayer.exe',
-            '.mp3': 'wmplayer.exe',
-            '.wav': 'wmplayer.exe',
-            '.zip': 'explorer.exe',
-            '.rar': 'explorer.exe',
-            '.7z': 'explorer.exe'
-        }
-        
-        return app_map.get(ext, 'explorer.exe')
-    
     def run_in_sandboxie(self, file_path, args=None):
+        """Run a file using Sandboxie-Plus - FIXED for images"""
         if not self.is_sandboxie_installed():
             self.add_log("⚠️ Sandboxie-Plus not installed")
             return None
@@ -122,26 +89,141 @@ class SandboxManager:
             file_name = os.path.basename(file_path)
             self.add_log(f"📄 File: {file_name} (Type: {file_type})")
             
+            # Get Sandboxie-Plus installation directory
             sandboxie_dir = os.path.dirname(self.sandboxie_path)
             sandbox_name = self.sandbox_name
             
+            # Use Start.exe
             start_exe = os.path.join(sandboxie_dir, "Start.exe")
             if not os.path.exists(start_exe):
                 start_exe = self.sandboxie_path
             
+            # For images, use the new reliable method
             if file_type == 'image':
-                app = self.get_default_app_for_file(file_path)
-                cmd = [start_exe, "/box:" + sandbox_name, app, file_path]
-                self.add_log(f"🖼️ Opening image with: {' '.join(cmd)}")
+                return self.open_image_reliable(file_path, sandboxie_dir, sandbox_name)
             elif file_type == 'executable':
-                cmd = [start_exe, "/box:" + sandbox_name, file_path]
-                if args:
-                    cmd.extend(args)
-                self.add_log(f"🚀 Launching executable: {' '.join(cmd)}")
+                return self.run_executable_in_sandboxie(file_path, args, sandboxie_dir, sandbox_name)
             else:
-                app = self.get_default_app_for_file(file_path)
-                cmd = [start_exe, "/box:" + sandbox_name, app, file_path]
-                self.add_log(f"📂 Opening with default app: {' '.join(cmd)}")
+                return self.open_file_in_sandboxie(file_path, sandboxie_dir, sandbox_name)
+            
+        except Exception as e:
+            self.add_log(f"❌ Error: {e}")
+            import traceback
+            traceback.print_exc()
+            return self.run_fallback_sandbox(file_path)
+    
+    def open_image_reliable(self, file_path, sandboxie_dir, sandbox_name):
+        """RELIABLE method to open images in Sandboxie-Plus"""
+        try:
+            start_exe = os.path.join(sandboxie_dir, "Start.exe")
+            if not os.path.exists(start_exe):
+                start_exe = self.sandboxie_path
+            
+            # METHOD: Use the built-in Windows Photo Viewer via rundll32
+            # This is the most reliable way to open images in Sandboxie
+            self.add_log(f"🖼️ Opening image with Windows Photo Viewer...")
+            
+            # Copy the image to a temp location with no spaces in path
+            # This avoids path issues in Sandboxie
+            temp_dir = os.path.join(os.environ['TEMP'], f"sandbox_img_{int(time.time())}")
+            os.makedirs(temp_dir, exist_ok=True)
+            
+            # Copy file with a simple name (no spaces)
+            file_ext = os.path.splitext(file_path)[1]
+            temp_file = os.path.join(temp_dir, f"image{file_ext}")
+            shutil.copy2(file_path, temp_file)
+            self.add_log(f"📂 Copied to temp: {temp_file}")
+            
+            # Use rundll32 to open with Photo Viewer
+            cmd = [
+                start_exe,
+                "/box:" + sandbox_name,
+                "rundll32.exe",
+                "shimgvw.dll,ImageView_Fullscreen",
+                temp_file
+            ]
+            
+            self.add_log(f"📂 Command: {' '.join(cmd)}")
+            
+            # Launch with CREATE_NO_WINDOW flag
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                shell=False
+            )
+            
+            # Wait a moment for it to start
+            time.sleep(2)
+            
+            # Check if it started
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                self.add_log(f"⚠️ Photo Viewer failed: {stderr.decode() if stderr else 'Unknown'}")
+                
+                # Try alternative method with mspaint
+                return self.open_image_with_mspaint_reliable(file_path, sandboxie_dir, sandbox_name, temp_dir)
+            
+            process_info = {
+                "process": process,
+                "file_path": file_path,
+                "temp_file": temp_file,
+                "temp_dir": temp_dir,
+                "sandbox": "Sandboxie-Plus",
+                "sandbox_name": sandbox_name,
+                "start_time": datetime.now().isoformat(),
+                "pid": process.pid,
+                "monitoring": True,
+                "file_type": "image"
+            }
+            
+            self.sandbox_processes.append(process_info)
+            self.add_log(f"✅ Image opened with Photo Viewer (PID: {process.pid})")
+            
+            # Start monitoring
+            monitor_thread = threading.Thread(
+                target=self.monitor_sandboxie_process,
+                args=(process_info,),
+                daemon=True
+            )
+            monitor_thread.start()
+            
+            return process_info
+            
+        except Exception as e:
+            self.add_log(f"❌ Error opening image: {e}")
+            return self.open_image_with_mspaint_reliable(file_path, sandboxie_dir, sandbox_name)
+    
+    def open_image_with_mspaint_reliable(self, file_path, sandboxie_dir, sandbox_name, temp_dir=None):
+        """Open image with MSPaint in Sandboxie-Plus - RELIABLE"""
+        try:
+            start_exe = os.path.join(sandboxie_dir, "Start.exe")
+            if not os.path.exists(start_exe):
+                start_exe = self.sandboxie_path
+            
+            # Use a temp file with simple name if not provided
+            if not temp_dir:
+                temp_dir = os.path.join(os.environ['TEMP'], f"sandbox_img_{int(time.time())}")
+                os.makedirs(temp_dir, exist_ok=True)
+                file_ext = os.path.splitext(file_path)[1]
+                temp_file = os.path.join(temp_dir, f"image{file_ext}")
+                shutil.copy2(file_path, temp_file)
+            else:
+                file_ext = os.path.splitext(file_path)[1]
+                temp_file = os.path.join(temp_dir, f"image{file_ext}")
+            
+            self.add_log(f"🖼️ Opening image with MSPaint...")
+            
+            # Use mspaint with the temp file
+            cmd = [
+                start_exe,
+                "/box:" + sandbox_name,
+                "mspaint.exe",
+                temp_file
+            ]
+            
+            self.add_log(f"📂 Command: {' '.join(cmd)}")
             
             process = subprocess.Popen(
                 cmd,
@@ -151,7 +233,77 @@ class SandboxManager:
                 shell=False
             )
             
-            time.sleep(0.5)
+            time.sleep(2)
+            
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                self.add_log(f"⚠️ MSPaint failed: {stderr.decode() if stderr else 'Unknown'}")
+                # Try opening with explorer
+                return self.open_image_with_explorer(file_path, sandboxie_dir, sandbox_name)
+            
+            process_info = {
+                "process": process,
+                "file_path": file_path,
+                "temp_file": temp_file,
+                "temp_dir": temp_dir,
+                "sandbox": "Sandboxie-Plus",
+                "sandbox_name": sandbox_name,
+                "start_time": datetime.now().isoformat(),
+                "pid": process.pid,
+                "monitoring": True,
+                "file_type": "image"
+            }
+            
+            self.sandbox_processes.append(process_info)
+            self.add_log(f"✅ Image opened with MSPaint (PID: {process.pid})")
+            
+            monitor_thread = threading.Thread(
+                target=self.monitor_sandboxie_process,
+                args=(process_info,),
+                daemon=True
+            )
+            monitor_thread.start()
+            
+            return process_info
+            
+        except Exception as e:
+            self.add_log(f"❌ MSPaint error: {e}")
+            return self.open_image_with_explorer(file_path, sandboxie_dir, sandbox_name)
+    
+    def open_image_with_explorer(self, file_path, sandboxie_dir, sandbox_name):
+        """Open image with Explorer in Sandboxie-Plus"""
+        try:
+            start_exe = os.path.join(sandboxie_dir, "Start.exe")
+            if not os.path.exists(start_exe):
+                start_exe = self.sandboxie_path
+            
+            self.add_log(f"🖼️ Opening image with Explorer...")
+            
+            # Use explorer to open the file with default app
+            cmd = [
+                start_exe,
+                "/box:" + sandbox_name,
+                "explorer.exe",
+                file_path
+            ]
+            
+            self.add_log(f"📂 Command: {' '.join(cmd)}")
+            
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                shell=False
+            )
+            
+            time.sleep(2)
+            
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                self.add_log(f"⚠️ Explorer failed: {stderr.decode() if stderr else 'Unknown'}")
+                # Last resort: fallback sandbox
+                return self.run_fallback_sandbox(file_path)
             
             process_info = {
                 "process": process,
@@ -161,7 +313,108 @@ class SandboxManager:
                 "start_time": datetime.now().isoformat(),
                 "pid": process.pid,
                 "monitoring": True,
-                "file_type": file_type
+                "file_type": "image"
+            }
+            
+            self.sandbox_processes.append(process_info)
+            self.add_log(f"✅ Image opened with Explorer (PID: {process.pid})")
+            
+            monitor_thread = threading.Thread(
+                target=self.monitor_sandboxie_process,
+                args=(process_info,),
+                daemon=True
+            )
+            monitor_thread.start()
+            
+            return process_info
+            
+        except Exception as e:
+            self.add_log(f"❌ Explorer error: {e}")
+            return self.run_fallback_sandbox(file_path)
+    
+    def run_executable_in_sandboxie(self, file_path, args, sandboxie_dir, sandbox_name):
+        """Run executable in Sandboxie-Plus"""
+        try:
+            start_exe = os.path.join(sandboxie_dir, "Start.exe")
+            if not os.path.exists(start_exe):
+                start_exe = self.sandboxie_path
+            
+            cmd = [start_exe, "/box:" + sandbox_name, file_path]
+            if args:
+                cmd.extend(args)
+            
+            self.add_log(f"🚀 Launching executable: {' '.join(cmd)}")
+            
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                creationflags=subprocess.CREATE_NEW_CONSOLE,
+                shell=False
+            )
+            
+            process_info = {
+                "process": process,
+                "file_path": file_path,
+                "sandbox": "Sandboxie-Plus",
+                "sandbox_name": sandbox_name,
+                "start_time": datetime.now().isoformat(),
+                "pid": process.pid,
+                "monitoring": True,
+                "file_type": "executable"
+            }
+            
+            self.sandbox_processes.append(process_info)
+            self.add_log(f"✅ Executable running in Sandboxie-Plus (PID: {process.pid})")
+            
+            monitor_thread = threading.Thread(
+                target=self.monitor_sandboxie_process,
+                args=(process_info,),
+                daemon=True
+            )
+            monitor_thread.start()
+            
+            return process_info
+            
+        except Exception as e:
+            self.add_log(f"❌ Error running executable: {e}")
+            return None
+    
+    def open_file_in_sandboxie(self, file_path, sandboxie_dir, sandbox_name):
+        """Open non-executable file in Sandboxie-Plus"""
+        try:
+            start_exe = os.path.join(sandboxie_dir, "Start.exe")
+            if not os.path.exists(start_exe):
+                start_exe = self.sandboxie_path
+            
+            # Use explorer to open with default app
+            cmd = [start_exe, "/box:" + sandbox_name, "explorer.exe", file_path]
+            self.add_log(f"📂 Opening file: {' '.join(cmd)}")
+            
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                shell=False
+            )
+            
+            time.sleep(1)
+            
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                self.add_log(f"⚠️ Failed to open file: {stderr.decode() if stderr else 'Unknown error'}")
+                return self.run_fallback_sandbox(file_path)
+            
+            process_info = {
+                "process": process,
+                "file_path": file_path,
+                "sandbox": "Sandboxie-Plus",
+                "sandbox_name": sandbox_name,
+                "start_time": datetime.now().isoformat(),
+                "pid": process.pid,
+                "monitoring": True,
+                "file_type": "document"
             }
             
             self.sandbox_processes.append(process_info)
@@ -177,214 +430,64 @@ class SandboxManager:
             return process_info
             
         except Exception as e:
-            self.add_log(f"❌ Error: {e}")
+            self.add_log(f"❌ Error opening file: {e}")
             return self.run_fallback_sandbox(file_path)
     
-    def emergency_kill_all(self):
-        """Emergency kill - KILL LOCK SCREEN APPS AND SANDBOX"""
-        self.add_log("🚨 EMERGENCY KILL ACTIVATED!")
-        self.add_log("="*60)
-        
-        killed_processes = []
-        killed_names = []
-        unlocked_count = 0
-        
-        current_pid = os.getpid()
-        
-        # METHOD 1: Kill ALL Sandboxie processes
-        self.add_log("💀 Killing all Sandboxie processes...")
-        try:
-            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
-                try:
-                    proc_info = proc.info
-                    proc_name = proc_info['name'].lower()
-                    cmdline = ' '.join(proc_info['cmdline']).lower() if proc_info['cmdline'] else ''
-                    
-                    if proc_info['pid'] == current_pid:
-                        continue
-                    
-                    is_sandboxie = False
-                    if any(name in proc_name for name in ['sandman', 'start', 'sandboxie', 'sandbox']):
-                        is_sandboxie = True
-                    if '/box:' in cmdline or 'defaultbox' in cmdline:
-                        is_sandboxie = True
-                    
-                    if is_sandboxie:
-                        try:
-                            proc.kill()
-                            killed_processes.append(proc_info['pid'])
-                            killed_names.append(f"Sandboxie: {proc_info['name']} (PID: {proc_info['pid']})")
-                            self.add_log(f"💀 Killed Sandboxie: {proc_info['name']} (PID: {proc_info['pid']})")
-                        except:
-                            pass
-                except:
-                    pass
-        except:
-            pass
-        
-        # METHOD 2: KILL PYTHON LOCK SCREEN APPLICATIONS (THIS IS YOUR APP.PY)
-        self.add_log("💀 Killing Python lock screen applications...")
-        try:
-            for proc in psutil.process_iter(['pid', 'name', 'cmdline', 'ppid']):
-                try:
-                    proc_info = proc.info
-                    proc_name = proc_info['name'].lower()
-                    cmdline = ' '.join(proc_info['cmdline']).lower() if proc_info['cmdline'] else ''
-                    
-                    if proc_info['pid'] == current_pid:
-                        continue
-                    
-                    is_lock_screen = False
-                    
-                    # Check if it's a Python process
-                    if 'python' in proc_name or 'py' in proc_name:
-                        # Check for lock screen indicators in command line
-                        lock_indicators = [
-                            'tkinter', 'lock', 'screen', 'password', 'unlock', 
-                            'toggle_desktop', 'wallpaper', 'overrideredirect', 
-                            'topmost', 'system_menu', 'capcut', 'app.py',
-                            '.locked', 'desktop', 'LOCKED', 'SYSTEM LOCKED'
-                        ]
-                        
-                        if any(indicator in cmdline for indicator in lock_indicators):
-                            is_lock_screen = True
-                            self.add_log(f"🔍 Found lock screen: {proc_info['name']} - {cmdline[:100]}")
-                    
-                    # Also check for any process with lock screen in window title
-                    if is_lock_screen:
-                        try:
-                            proc.kill()
-                            killed_processes.append(proc_info['pid'])
-                            killed_names.append(f"Lock Screen: {proc_info['name']} (PID: {proc_info['pid']})")
-                            self.add_log(f"💀 Killed lock screen: {proc_info['name']} (PID: {proc_info['pid']})")
-                        except:
-                            pass
-                except:
-                    pass
-        except:
-            pass
-        
-        # METHOD 3: Kill processes with lock screen window titles
-        self.add_log("💀 Killing processes with lock screen windows...")
-        try:
-            import win32gui
-            import win32process
-            
-            def enum_windows_callback(hwnd, extra):
-                try:
-                    if win32gui.IsWindowVisible(hwnd):
-                        window_text = win32gui.GetWindowText(hwnd)
-                        if any(text in window_text.lower() for text in ['lock', 'system locked', 'password', 'capcut']):
-                            _, pid = win32process.GetWindowThreadProcessId(hwnd)
-                            if pid and pid != current_pid:
-                                try:
-                                    proc = psutil.Process(pid)
-                                    proc.kill()
-                                    if pid not in killed_processes:
-                                        killed_processes.append(pid)
-                                        killed_names.append(f"Lock Window: {window_text} (PID: {pid})")
-                                        self.add_log(f"💀 Killed lock window: {window_text} (PID: {pid})")
-                                except:
-                                    pass
-                except:
-                    pass
-            
-            win32gui.EnumWindows(enum_windows_callback, None)
-        except:
-            pass
-        
-        # METHOD 4: Unlock desktop files
-        self.add_log("🔓 Unlocking desktop files...")
-        try:
-            desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
-            locked_extension = ".locked"
-            
-            for item in os.listdir(desktop_path):
-                if item.endswith(locked_extension):
-                    original_path = os.path.join(desktop_path, item.replace(locked_extension, ""))
-                    locked_path = os.path.join(desktop_path, item)
-                    try:
-                        os.rename(locked_path, original_path)
-                        unlocked_count += 1
-                        self.add_log(f"🔓 Unlocked: {item}")
-                    except:
-                        pass
-            
-            if unlocked_count > 0:
-                try:
-                    ctypes.windll.shell32.SHChangeNotify(0x08000000, 0, None, None)
-                except:
-                    pass
-                killed_names.append(f"Unlocked {unlocked_count} desktop files")
-        except:
-            pass
-        
-        # METHOD 5: Restore wallpaper
-        self.add_log("🖼️ Restoring wallpaper...")
-        try:
-            import winreg
-            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, 
-                                r"Control Panel\Desktop", 
-                                0, 
-                                winreg.KEY_READ)
-            wallpaper_path, _ = winreg.QueryValueEx(key, "WallPaper")
-            winreg.CloseKey(key)
-            
-            if wallpaper_path and any(x in wallpaper_path.lower() for x in ['in.jpg', 'lock', 'capcut']):
-                default_wallpapers = [
-                    r"C:\Windows\Web\Wallpaper\Windows\img0.jpg",
-                    r"C:\Windows\Web\Wallpaper\Windows\img0_256x256.jpg",
-                ]
-                for wall in default_wallpapers:
-                    if os.path.exists(wall):
-                        ctypes.windll.user32.SystemParametersInfoW(0x0014, 0, wall, 0x01 | 0x02)
-                        self.add_log(f"🖼️ Restored wallpaper to: {wall}")
-                        killed_names.append("Wallpaper restored")
-                        break
-        except:
-            pass
-        
-        # METHOD 6: Clean up sandbox directory
-        if self.sandbox_dir and os.path.exists(self.sandbox_dir):
-            try:
-                shutil.rmtree(self.sandbox_dir)
-                self.add_log(f"🗑️ Removed sandbox directory: {self.sandbox_dir}")
-                self.sandbox_dir = None
-            except:
-                pass
-        
-        self.sandbox_processes = []
-        
-        self.add_log("="*60)
-        self.add_log(f"✅ Emergency kill completed. Killed {len(killed_processes)} processes.")
-        
-        return {
-            "killed_count": len(killed_processes),
-            "killed_pids": killed_processes,
-            "killed_names": killed_names,
-            "unlocked_files": unlocked_count,
-            "processes": killed_names
-        }
-    
     def run_fallback_sandbox(self, file_path, args=None):
+        """Fallback sandbox with proper image support"""
         try:
             file_type = self.get_file_type(file_path)
             self.add_log(f"⚠️ Using fallback sandbox for {file_type} file")
             
+            # Create isolated environment
             sandbox_dir = os.path.join(os.environ['TEMP'], f"sandbox_{int(time.time())}")
             os.makedirs(sandbox_dir, exist_ok=True)
             self.sandbox_dir = sandbox_dir
             
-            file_name = os.path.basename(file_path)
+            # Copy file to sandbox with simple name
+            file_ext = os.path.splitext(file_path)[1]
+            file_name = f"file{file_ext}"
             sandbox_file = os.path.join(sandbox_dir, file_name)
             shutil.copy2(file_path, sandbox_file)
             
+            # Open file based on type
             if file_type == 'executable':
                 process = subprocess.Popen(
                     [sandbox_file] + (args or []),
                     cwd=sandbox_dir,
                     creationflags=subprocess.CREATE_NEW_CONSOLE
                 )
+            elif file_type == 'image':
+                # Try multiple image viewers
+                image_viewers = [
+                    ['mspaint.exe', sandbox_file],
+                    ['explorer.exe', sandbox_file],
+                    ['rundll32.exe', 'shimgvw.dll,ImageView_Fullscreen', sandbox_file]
+                ]
+                
+                process = None
+                for viewer in image_viewers:
+                    try:
+                        self.add_log(f"🖼️ Trying viewer: {viewer[0]}")
+                        process = subprocess.Popen(
+                            viewer,
+                            cwd=sandbox_dir,
+                            creationflags=subprocess.CREATE_NO_WINDOW
+                        )
+                        time.sleep(1)
+                        if process.poll() is None:
+                            break
+                    except:
+                        continue
+                
+                if process is None or process.poll() is not None:
+                    self.add_log("⚠️ All viewers failed, using default")
+                    process = subprocess.Popen(
+                        ['cmd', '/c', 'start', '', sandbox_file],
+                        cwd=sandbox_dir,
+                        shell=True,
+                        creationflags=subprocess.CREATE_NO_WINDOW
+                    )
             else:
                 process = subprocess.Popen(
                     ['cmd', '/c', 'start', '', sandbox_file],
@@ -393,7 +496,7 @@ class SandboxManager:
                     creationflags=subprocess.CREATE_NO_WINDOW
                 )
             
-            time.sleep(0.5)
+            time.sleep(1)
             
             process_info = {
                 "process": process,
@@ -423,6 +526,7 @@ class SandboxManager:
             return None
     
     def monitor_sandboxie_process(self, process_info):
+        """Monitor process running in Sandboxie"""
         process = process_info["process"]
         start_time = time.time()
         
@@ -433,6 +537,8 @@ class SandboxManager:
                     process_info["end_time"] = datetime.now().isoformat()
                     process_info["exit_code"] = process.returncode
                     self.add_log(f"✅ Process completed (exit code: {process.returncode})")
+                    # Clean up temp files
+                    self.cleanup_temp_files(process_info)
                     break
                 
                 try:
@@ -441,16 +547,19 @@ class SandboxManager:
                         process_info["monitoring"] = False
                         process_info["end_time"] = datetime.now().isoformat()
                         self.add_log(f"✅ Process {process.pid} terminated")
+                        self.cleanup_temp_files(process_info)
                         break
                 except:
                     process_info["monitoring"] = False
                     process_info["end_time"] = datetime.now().isoformat()
+                    self.cleanup_temp_files(process_info)
                     break
                 
                 if time.time() - start_time > 300:
                     self.add_log(f"⏹️ Process {process.pid} still running, continuing...")
                     process_info["monitoring"] = False
                     process_info["end_time"] = datetime.now().isoformat()
+                    self.cleanup_temp_files(process_info)
                     break
                 
                 time.sleep(2)
@@ -459,7 +568,18 @@ class SandboxManager:
                 self.add_log(f"⚠️ Monitor error: {e}")
                 break
     
+    def cleanup_temp_files(self, process_info):
+        """Clean up temporary files created for sandbox"""
+        try:
+            temp_dir = process_info.get("temp_dir")
+            if temp_dir and os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+                self.add_log(f"🗑️ Removed temp dir: {temp_dir}")
+        except:
+            pass
+    
     def monitor_fallback_process(self, process_info):
+        """Monitor process running in fallback sandbox"""
         process = process_info["process"]
         sandbox_dir = process_info.get("sandbox_dir")
         start_time = time.time()
@@ -494,12 +614,14 @@ class SandboxManager:
                 break
     
     def add_log(self, message):
+        """Add message to sandbox log"""
         timestamp = datetime.now().strftime("%H:%M:%S")
         log_entry = f"[{timestamp}] {message}"
         self.sandbox_log.append(log_entry)
         print(log_entry)
     
     def get_sandbox_activity(self):
+        """Get activity log from sandbox"""
         activity = {
             "total_processes": len(self.sandbox_processes),
             "active_processes": len([p for p in self.sandbox_processes if p.get("monitoring", False)]),
@@ -528,6 +650,7 @@ class SandboxManager:
         return activity
     
     def clean_sandbox(self):
+        """Clean up sandbox processes"""
         try:
             self.add_log("🧹 Cleaning up sandbox...")
             
@@ -541,6 +664,8 @@ class SandboxManager:
                         self.add_log(f"⏹️ Terminated process {proc['pid']}")
                     except:
                         pass
+                # Clean up temp files
+                self.cleanup_temp_files(proc)
             
             self.sandbox_processes = []
             
@@ -557,7 +682,162 @@ class SandboxManager:
         except Exception as e:
             self.add_log(f"❌ Error cleaning sandbox: {e}")
     
+    def emergency_kill_all(self):
+        """Emergency kill - KILL LOCK SCREEN APPS AND SANDBOX"""
+        self.add_log("🚨 EMERGENCY KILL ACTIVATED!")
+        self.add_log("="*60)
+        
+        killed_processes = []
+        killed_names = []
+        unlocked_count = 0
+        
+        current_pid = os.getpid()
+        
+        # Method 1: Kill ALL Sandboxie processes
+        self.add_log("💀 Killing all Sandboxie processes...")
+        try:
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                try:
+                    proc_info = proc.info
+                    proc_name = proc_info['name'].lower()
+                    cmdline = ' '.join(proc_info['cmdline']).lower() if proc_info['cmdline'] else ''
+                    
+                    if proc_info['pid'] == current_pid:
+                        continue
+                    
+                    is_sandboxie = False
+                    if any(name in proc_name for name in ['sandman', 'start', 'sandboxie', 'sandbox']):
+                        is_sandboxie = True
+                    if '/box:' in cmdline or 'defaultbox' in cmdline:
+                        is_sandboxie = True
+                    
+                    if is_sandboxie:
+                        try:
+                            proc.kill()
+                            killed_processes.append(proc_info['pid'])
+                            killed_names.append(f"Sandboxie: {proc_info['name']} (PID: {proc_info['pid']})")
+                            self.add_log(f"💀 Killed Sandboxie: {proc_info['name']} (PID: {proc_info['pid']})")
+                        except:
+                            pass
+                except:
+                    pass
+        except:
+            pass
+        
+        # Method 2: KILL PYTHON LOCK SCREEN APPLICATIONS
+        self.add_log("💀 Killing Python lock screen applications...")
+        try:
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                try:
+                    proc_info = proc.info
+                    proc_name = proc_info['name'].lower()
+                    cmdline = ' '.join(proc_info['cmdline']).lower() if proc_info['cmdline'] else ''
+                    
+                    if proc_info['pid'] == current_pid:
+                        continue
+                    
+                    is_lock_screen = False
+                    
+                    if 'python' in proc_name or 'py' in proc_name:
+                        lock_indicators = [
+                            'tkinter', 'lock', 'screen', 'password', 'unlock', 
+                            'toggle_desktop', 'wallpaper', 'overrideredirect', 
+                            'topmost', 'system_menu', 'capcut', 'app.py',
+                            '.locked', 'desktop', 'LOCKED', 'SYSTEM LOCKED'
+                        ]
+                        
+                        if any(indicator in cmdline for indicator in lock_indicators):
+                            is_lock_screen = True
+                            self.add_log(f"🔍 Found lock screen: {proc_info['name']} - {cmdline[:100]}")
+                    
+                    if is_lock_screen:
+                        try:
+                            proc.kill()
+                            killed_processes.append(proc_info['pid'])
+                            killed_names.append(f"Lock Screen: {proc_info['name']} (PID: {proc_info['pid']})")
+                            self.add_log(f"💀 Killed lock screen: {proc_info['name']} (PID: {proc_info['pid']})")
+                        except:
+                            pass
+                except:
+                    pass
+        except:
+            pass
+        
+        # Method 3: Unlock desktop files
+        self.add_log("🔓 Unlocking desktop files...")
+        try:
+            desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
+            locked_extension = ".locked"
+            
+            for item in os.listdir(desktop_path):
+                if item.endswith(locked_extension):
+                    original_path = os.path.join(desktop_path, item.replace(locked_extension, ""))
+                    locked_path = os.path.join(desktop_path, item)
+                    try:
+                        os.rename(locked_path, original_path)
+                        unlocked_count += 1
+                        self.add_log(f"🔓 Unlocked: {item}")
+                    except:
+                        pass
+            
+            if unlocked_count > 0:
+                try:
+                    ctypes.windll.shell32.SHChangeNotify(0x08000000, 0, None, None)
+                except:
+                    pass
+                killed_names.append(f"Unlocked {unlocked_count} desktop files")
+        except:
+            pass
+        
+        # Method 4: Restore wallpaper
+        self.add_log("🖼️ Restoring wallpaper...")
+        try:
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, 
+                                r"Control Panel\Desktop", 
+                                0, 
+                                winreg.KEY_READ)
+            wallpaper_path, _ = winreg.QueryValueEx(key, "WallPaper")
+            winreg.CloseKey(key)
+            
+            if wallpaper_path and any(x in wallpaper_path.lower() for x in ['in.jpg', 'lock', 'capcut']):
+                default_wallpapers = [
+                    r"C:\Windows\Web\Wallpaper\Windows\img0.jpg",
+                    r"C:\Windows\Web\Wallpaper\Windows\img0_256x256.jpg",
+                ]
+                for wall in default_wallpapers:
+                    if os.path.exists(wall):
+                        ctypes.windll.user32.SystemParametersInfoW(0x0014, 0, wall, 0x01 | 0x02)
+                        self.add_log(f"🖼️ Restored wallpaper to: {wall}")
+                        killed_names.append("Wallpaper restored")
+                        break
+        except:
+            pass
+        
+        # Method 5: Clean up sandbox directory
+        if self.sandbox_dir and os.path.exists(self.sandbox_dir):
+            try:
+                shutil.rmtree(self.sandbox_dir)
+                self.add_log(f"🗑️ Removed sandbox directory: {self.sandbox_dir}")
+                self.sandbox_dir = None
+            except:
+                pass
+        
+        self.sandbox_processes = []
+        
+        self.add_log("="*60)
+        self.add_log(f"✅ Emergency kill completed. Killed {len(killed_processes)} processes.")
+        
+        return {
+            "killed_count": len(killed_processes),
+            "killed_pids": killed_processes,
+            "killed_names": killed_names,
+            "unlocked_files": unlocked_count,
+            "processes": killed_names
+        }
+    
     def scan_with_sandboxie(self, file_path):
+        """Quick scan file using Sandboxie-Plus"""
         results = {
             "file": file_path,
             "sandboxie_installed": self.is_sandboxie_installed(),
